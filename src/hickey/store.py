@@ -1,299 +1,293 @@
-"""
-Markdown-first memory storage backed by a SQLite index.
-
-Source of truth: markdown files in memories_dir.
-Index (FTS5 + optional sqlite-vec): derived cache, rebuildable via rebuild_index().
-"""
-
+import json
+import os
 import sqlite3
 import struct
-from datetime import datetime, timezone
+import uuid
+import typing as T
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from datetime import datetime, timezone, MAXYEAR
+from enum import Enum
 from pathlib import Path
-from typing import Optional
-
-import yaml
-
-from .model import (
-    HALF_LIVES,
-    TYPE_WEIGHTS,
-    Memory,
-    MemoryType,
-    id,
-    _now,
-)
-
-# ---------------------------------------------------------------------------
-# Optional vector support — gracefully degrades to FTS5-only
-# ---------------------------------------------------------------------------
-
-_sqlite_vec = None
-_TextEmbedding = None
 
 try:
-    import sqlite_vec as _sqlite_vec  # type: ignore[no-redef]
+    import sqlite_vec  # type: ignore
+    _HAS_VEC = True
 except ImportError:
-    pass
+    _HAS_VEC = False
 
 try:
-    from fastembed import TextEmbedding as _TextEmbedding  # type: ignore[no-redef]
+    from fastembed import TextEmbedding  # type: ignore
+    _HAS_EMBED = True
 except ImportError:
-    pass
+    _HAS_EMBED = False
 
-EMBED_MODEL = "BAAI/bge-small-en-v1.5"
-EMBED_DIM = 384
+EMBED_MODEL: str = "BAAI/bge-small-en-v1.5"
+EMBED_DIM: int = 384
 
 
 def _serialize_f32(vec: list[float]) -> bytes:
     return struct.pack(f"{len(vec)}f", *vec)
 
 
-# ---------------------------------------------------------------------------
-# Store
-# ---------------------------------------------------------------------------
+class MemoryType(Enum):
+    CORRECTION    = (1.5, 90)
+    DECISION      = (1.2, 60)
+    FACT          = (1.0, 30)
+    PREFERENCE    = (1.1, 60)
+    INVESTIGATION = (0.8, 21)
+
+    def __init__(self, weight: float, halflife: int):
+        self.weight = weight
+        self.halflife = halflife
+
+
+@dataclass
+class Memory:
+    content: str
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    type: MemoryType = MemoryType.FACT
+    project: str = field(default_factory=lambda: os.path.basename(os.getcwd()))
+    tags: list[str] = field(default_factory=list)
+    auto: bool = False
+    confidence: float = 1.0
+    created: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    expires: datetime = field(default_factory=lambda: datetime(MAXYEAR, 12, 31, 23, 59, 59, 999999))
+
+    def to_json(self) -> str:
+        return json.dumps({
+            "id": self.id,
+            "content": self.content,
+            "type": self.type.name.lower(),
+            "project": self.project,
+            "tags": self.tags,
+            "auto": self.auto,
+            "confidence": self.confidence,
+            "created": self.created.isoformat(),
+            "updated": self.updated.isoformat(),
+            "expires": self.expires.isoformat(),
+        }, indent=2)
+
+    @classmethod
+    def from_json(cls, text: str) -> "Memory":
+        d: dict = json.loads(text)
+        return cls(
+            id=d["id"],
+            content=d["content"],
+            type=MemoryType[d["type"].upper()],
+            project=d["project"],
+            tags=d.get("tags", []),
+            auto=d.get("auto", False),
+            confidence=d.get("confidence", 1.0),
+            created=datetime.fromisoformat(d["created"]),
+            updated=datetime.fromisoformat(d["updated"]),
+            expires=datetime.fromisoformat(d["expires"]),
+        )
+
+    def __repr__(self) -> str:
+        age: int = (datetime.now(timezone.utc) - self.created).days
+        line: str = f"[{self.type.name.lower()}] {self.content[:200]}"
+        meta: str = f"  id={self.id}  confidence={self.confidence}  age={age}days  project={self.project}  tags={','.join(self.tags)}"
+        return f"{line}\n{meta}"
+
+
+class SearchResult(T.NamedTuple):
+    memory: Memory
+    score: float
+
+    def __repr__(self) -> str:
+        return f"({self.score:.4f}) {self.memory}"
 
 
 class MemoryStore:
-    def __init__(self, base_dir: Optional[Path] = None):
-        self.base_dir = Path(base_dir) if base_dir else Path.home() / ".hickey"
-        self.memories_dir = self.base_dir / "memories"
-        self.db_path = self.base_dir / "index.db"
+    def __init__(self, base_dir: T.Optional[Path] = None):
+        self.base_dir: Path = Path(base_dir) if base_dir else Path.home() / ".hickey"
+        self.memories_dir: Path = self.base_dir / "memories"
+        self.db_path: Path = self.base_dir / "index.db"
         self.memories_dir.mkdir(parents=True, exist_ok=True)
-
-        self._embedder = None
-        self._db: sqlite3.Connection = None  # type: ignore[assignment]
+        self._pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1)
+        self._embedder: T.Optional[T.Any] = None
         self._init_db()
 
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
-
-    @property
-    def vectors_available(self) -> bool:
-        return _sqlite_vec is not None and _TextEmbedding is not None
-
-    # ------------------------------------------------------------------
-    # Database
-    # ------------------------------------------------------------------
-
     def _init_db(self) -> None:
-        self._db = sqlite3.connect(str(self.db_path))
+        self._db: sqlite3.Connection = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")
-
-        self._db.execute(
-            """
+        self._db.execute("""
             CREATE TABLE IF NOT EXISTS memories_meta (
-                id          TEXT PRIMARY KEY,
-                type        TEXT NOT NULL,
-                confidence  REAL NOT NULL DEFAULT 1.0,
-                created     TEXT NOT NULL,
-                updated     TEXT NOT NULL,
-                expires     TEXT,
-                source      TEXT DEFAULT 'manual',
-                project     TEXT,
-                tags        TEXT DEFAULT ''
+                id      TEXT PRIMARY KEY,
+                type    TEXT NOT NULL,
+                project TEXT NOT NULL,
+                updated TEXT NOT NULL,
+                expires TEXT NOT NULL
             )
-            """
-        )
-
-        self._db.execute(
-            """
+        """)
+        self._db.execute("""
             CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
                 id, content, type, tags, project,
                 tokenize='porter unicode61'
             )
-            """
-        )
-
+        """)
         if self.vectors_available:
             self._db.enable_load_extension(True)
-            _sqlite_vec.load(self._db)  # type: ignore[union-attr]
-            self._db.execute(
-                f"""
+            sqlite_vec.load(self._db)
+            self._db.execute(f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS memories_vec USING vec0(
                     id   TEXT PRIMARY KEY,
                     embedding float[{EMBED_DIM}]
                 )
-                """
-            )
-
+            """)
         self._db.commit()
 
-    def close(self) -> None:
-        if self._db:
-            self._db.close()
+    @property
+    def vectors_available(self) -> bool:
+        return _HAS_VEC and _HAS_EMBED
 
-    # ------------------------------------------------------------------
-    # Embeddings
-    # ------------------------------------------------------------------
-
-    def _get_embedder(self):
-        if self._embedder is None and _TextEmbedding is not None:
-            self._embedder = _TextEmbedding(EMBED_MODEL)
-        return self._embedder
-
-    def _embed(self, text: str) -> Optional[list[float]]:
-        embedder = self._get_embedder()
-        if embedder is None:
+    def _embed(self, text: str) -> T.Optional[list[float]]:
+        if not self.vectors_available:
             return None
-        results = list(embedder.embed([text]))
-        return results[0].tolist()
+        if self._embedder is None:
+            self._embedder = TextEmbedding(EMBED_MODEL)
+        return list(self._embedder.embed([text]))[0].tolist()
 
-    # ------------------------------------------------------------------
-    # Markdown I/O
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _to_markdown(memory: Memory) -> str:
-        fm: dict = {
-            "id": memory.id,
-            "type": memory.type.value,
-            "confidence": memory.confidence,
-            "created": memory.created.isoformat(),
-            "updated": memory.updated.isoformat(),
-            "source": memory.source,
-        }
-        if memory.expires:
-            fm["expires"] = memory.expires.isoformat()
-        if memory.tags:
-            fm["tags"] = memory.tags
-        if memory.project:
-            fm["project"] = memory.project
-        return f"---\n{yaml.dump(fm, default_flow_style=False, sort_keys=False)}---\n\n{memory.content}\n"
-
-    @staticmethod
-    def _from_markdown(text: str) -> Memory:
-        if not text.startswith("---"):
-            raise ValueError("No frontmatter")
-        _, fm_raw, body = text.split("---", 2)
-        meta = yaml.safe_load(fm_raw)
-
-        def _parse_dt(val):
-            if isinstance(val, datetime):
-                return val if val.tzinfo else val.replace(tzinfo=timezone.utc)
-            return datetime.fromisoformat(str(val))
-
-        return Memory(
-            id=meta["id"],
-            content=body.strip(),
-            type=MemoryType(meta["type"]),
-            confidence=meta.get("confidence", 1.0),
-            created=_parse_dt(meta["created"]),
-            updated=_parse_dt(meta["updated"]),
-            expires=_parse_dt(meta["expires"]) if meta.get("expires") else None,
-            tags=meta.get("tags", []),
-            source=meta.get("source", "manual"),
-            project=meta.get("project"),
+    def _save_index(self, memory: Memory) -> None:
+        self._db.execute("DELETE FROM memories_meta WHERE id = ?", (memory.id,))
+        self._db.execute(
+            "INSERT INTO memories_meta (id, type, project, updated, expires) VALUES (?, ?, ?, ?, ?)",
+            (memory.id, memory.type.name.lower(), memory.project, memory.updated.isoformat(), memory.expires.isoformat()),
         )
-
-    def _file_path(self, memory_id: str) -> Path:
-        return self.memories_dir / f"{memory_id}.md"
-
-    # ------------------------------------------------------------------
-    # Index helpers
-    # ------------------------------------------------------------------
-
-    def _index_memory(self, memory: Memory) -> None:
-        """Insert a memory into the SQLite index (FTS + meta + optional vec)."""
-        mid = memory.id
-
-        self._db.execute("DELETE FROM memories_fts WHERE id = ?", (mid,))
-        self._db.execute("DELETE FROM memories_meta WHERE id = ?", (mid,))
-
+        self._db.execute("DELETE FROM memories_fts WHERE id = ?", (memory.id,))
         self._db.execute(
             "INSERT INTO memories_fts (id, content, type, tags, project) VALUES (?, ?, ?, ?, ?)",
-            (mid, memory.content, memory.type.value, " ".join(memory.tags), memory.project or ""),
+            (memory.id, memory.content, memory.type.name.lower(), " ".join(memory.tags), memory.project),
         )
-        self._db.execute(
-            """INSERT INTO memories_meta
-               (id, type, confidence, created, updated, expires, source, project, tags)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                mid,
-                memory.type.value,
-                memory.confidence,
-                memory.created.isoformat(),
-                memory.updated.isoformat(),
-                memory.expires.isoformat() if memory.expires else None,
-                memory.source,
-                memory.project,
-                ",".join(memory.tags),
-            ),
-        )
-
         if self.vectors_available:
-            embedding = self._embed(memory.content)
+            embedding: T.Optional[list[float]] = self._embed(memory.content)
             if embedding:
-                self._db.execute("DELETE FROM memories_vec WHERE id = ?", (mid,))
+                self._db.execute("DELETE FROM memories_vec WHERE id = ?", (memory.id,))
                 self._db.execute(
                     "INSERT INTO memories_vec (id, embedding) VALUES (?, ?)",
-                    (mid, _serialize_f32(embedding)),
+                    (memory.id, _serialize_f32(embedding)),
                 )
-
-    def _remove_from_index(self, memory_id: str) -> None:
-        self._db.execute("DELETE FROM memories_fts WHERE id = ?", (memory_id,))
-        self._db.execute("DELETE FROM memories_meta WHERE id = ?", (memory_id,))
-        if self.vectors_available:
-            self._db.execute("DELETE FROM memories_vec WHERE id = ?", (memory_id,))
-
-    # ------------------------------------------------------------------
-    # CRUD
-    # ------------------------------------------------------------------
-
-    def save(self, memory: Memory) -> Memory:
-        memory.updated = _now()
-        self._file_path(memory.id).write_text(self._to_markdown(memory))
-        self._index_memory(memory)
         self._db.commit()
+
+    def _delete_index(self, id: str) -> None:
+        self._db.execute("DELETE FROM memories_meta WHERE id = ?", (id,))
+        self._db.execute("DELETE FROM memories_fts WHERE id = ?", (id,))
+        if self.vectors_available:
+            self._db.execute("DELETE FROM memories_vec WHERE id = ?", (id,))
+        self._db.commit()
+
+    def _rebuild_index(self) -> None:
+        """Drop and rebuild all index tables from JSON files on disk."""
+        self._db.execute("DELETE FROM memories_meta")
+        self._db.execute("DELETE FROM memories_fts")
+        if self.vectors_available:
+            self._db.execute("DELETE FROM memories_vec")
+        for path in self.memories_dir.glob("*.json"):
+            try:
+                memory: Memory = Memory.from_json(path.read_text())
+                self._save_index(memory)
+            except (json.JSONDecodeError, KeyError, ValueError) as exc:
+                print(f"warning: skipping {path.name}: {exc}")
+
+    def index(self) -> None:
+        """Rebuild the SQLite index from JSON files. Runs in a background thread."""
+        self._pool.submit(self._rebuild_index)
+
+    def save(
+        self,
+        memory: Memory
+    ) -> Memory:
+        """Write markdown file and update index. Indexing runs in a background thread."""
+        memory.updated = datetime.now(timezone.utc)
+        path: Path = self.memories_dir / f"{memory.id}.json"
+        path.write_text(memory.to_json())
+        self._pool.submit(self._save_index, memory)
         return memory
 
-    def get(self, memory_id: str) -> Optional[Memory]:
-        path = self._file_path(memory_id)
-        if not path.exists():
-            return None
-        return self._from_markdown(path.read_text())
+    def delete(
+        self,
+        id: str
+    ) -> None:
+        """Remove JSON file and delete from index."""
+        path: Path = self.memories_dir / f"{id}.json"
+        path.unlink(missing_ok=True)
+        self._pool.submit(self._delete_index, id)
 
-    def delete(self, memory_id: str) -> bool:
-        path = self._file_path(memory_id)
-        if not path.exists():
-            return False
-        path.unlink()
-        self._remove_from_index(memory_id)
-        self._db.commit()
-        return True
-
-    # ------------------------------------------------------------------
-    # Search
-    # ------------------------------------------------------------------
+    def list(
+        self,
+        type: T.Optional[MemoryType] = None,
+        project: T.Optional[str] = None,
+        limit: int = 20,
+    ) -> T.List[Memory]:
+        """Browse memories, newest first. Queries index for IDs, loads files on demand."""
+        # form sql query
+        sql: str = "SELECT id FROM memories_meta WHERE 1=1"
+        params: list = []
+        if type:
+            sql += " AND type = ?"
+            params.append(type.name.lower())
+        if project:
+            sql += " AND project = ?"
+            params.append(project)
+        sql += " ORDER BY updated DESC LIMIT ?"
+        params.append(limit)
+        # get an ordered list of matching memory ids
+        rows: list = self._db.execute(sql, params).fetchall()
+        # load those memories from files
+        memories: T.List[Memory] = []
+        for (row_id,) in rows:
+            path: Path = self.memories_dir / f"{row_id}.json"
+            if path.exists():
+                try:
+                    memories.append(Memory.from_json(path.read_text()))
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        return memories
 
     def search(
         self,
         query: str,
+        type: T.Optional[MemoryType] = None,
+        project: T.Optional[str] = None,
         limit: int = 5,
-        type_filter: Optional[MemoryType] = None,
-        project: Optional[str] = None,
-    ) -> list[tuple[Memory, float]]:
-        """Hybrid search: FTS5 BM25 + optional vector similarity, fused with RRF."""
-        overfetch = limit * 3
+    ) -> T.List[SearchResult]:
+        """Hybrid search: FTS5 BM25 + optional vector similarity, fused with RRF.
+        Results are boosted by type weight, confidence, and freshness decay."""
+        overfetch: int = limit * 3
+        now_iso: str = datetime.now(timezone.utc).isoformat()
 
-        # FTS5 ranked list
-        fts_ranked: list[str] = []
+        # Build meta filter clause
+        meta_where: str = "m.expires > ?"
+        meta_params: list = [now_iso]
+        if type:
+            meta_where += " AND m.type = ?"
+            meta_params.append(type.name.lower())
+        if project:
+            meta_where += " AND m.project = ?"
+            meta_params.append(project)
+
+        # FTS5 ranked list (joined with meta to pre-filter)
+        fts_ranked: T.List[str] = []
         try:
-            fts_query = " OR ".join(
-                f'"{token}"' for token in query.split() if token.strip()
-            )
+            fts_query: str = " OR ".join(f'"{t}"' for t in query.split() if t.strip())
             if fts_query:
                 rows = self._db.execute(
-                    "SELECT id FROM memories_fts WHERE memories_fts MATCH ? ORDER BY rank LIMIT ?",
-                    (fts_query, overfetch),
+                    f"""SELECT f.id FROM memories_fts f
+                        JOIN memories_meta m ON f.id = m.id
+                        WHERE memories_fts MATCH ? AND {meta_where}
+                        ORDER BY f.rank LIMIT ?""",
+                    (fts_query, *meta_params, overfetch),
                 ).fetchall()
                 fts_ranked = [r[0] for r in rows]
         except sqlite3.OperationalError:
             pass
 
         # Vector ranked list
-        vec_ranked: list[str] = []
+        vec_ranked: T.List[str] = []
         if self.vectors_available:
-            embedding = self._embed(query)
+            embedding: T.Optional[list[float]] = self._embed(query)
             if embedding:
                 rows = self._db.execute(
                     "SELECT id, distance FROM memories_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
@@ -302,8 +296,8 @@ class MemoryStore:
                 vec_ranked = [r[0] for r in rows]
 
         # RRF fusion (k=60)
-        k = 60
-        rrf_scores: dict[str, float] = {}
+        k: int = 60
+        rrf_scores: T.Dict[str, float] = {}
         for rank, mid in enumerate(fts_ranked):
             rrf_scores[mid] = rrf_scores.get(mid, 0) + 1.0 / (k + rank + 1)
         for rank, mid in enumerate(vec_ranked):
@@ -312,120 +306,31 @@ class MemoryStore:
         if not rrf_scores:
             return []
 
-        # Load, filter, boost
-        now = _now()
-        scored: list[tuple[Memory, float]] = []
+        # Filter vec-only candidates against meta
+        if vec_ranked:
+            placeholders: str = ",".join("?" * len(rrf_scores))
+            valid_rows = self._db.execute(
+                f"SELECT id FROM memories_meta WHERE id IN ({placeholders}) AND {meta_where}",
+                (*rrf_scores.keys(), *meta_params),
+            ).fetchall()
+            valid_ids: set = {r[0] for r in valid_rows}
+            rrf_scores = {mid: s for mid, s in rrf_scores.items() if mid in valid_ids}
+
+        # Load and boost
+        results: T.List[SearchResult] = []
+        now: datetime = datetime.now(timezone.utc)
         for mid, rrf in rrf_scores.items():
-            memory = self.get(mid)
-            if memory is None:
+            path: Path = self.memories_dir / f"{mid}.json"
+            if not path.exists():
                 continue
-            if type_filter and memory.type != type_filter:
-                continue
-            if project and memory.project != project:
-                continue
-            if memory.expires and memory.expires < now:
-                continue
-
-            type_weight = TYPE_WEIGHTS.get(memory.type, 1.0)
-            age_days = max((now - memory.created).total_seconds() / 86400, 0)
-            half_life = HALF_LIVES.get(memory.type, 30)
-            freshness = 0.5 ** (age_days / half_life)
-
-            scored.append((memory, rrf * type_weight * memory.confidence * freshness))
-
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return scored[:limit]
-
-    # ------------------------------------------------------------------
-    # List & audit
-    # ------------------------------------------------------------------
-
-    def list_memories(
-        self,
-        type_filter: Optional[MemoryType] = None,
-        project: Optional[str] = None,
-        limit: int = 20,
-    ) -> list[Memory]:
-        q = "SELECT id FROM memories_meta WHERE 1=1"
-        params: list = []
-        if type_filter:
-            q += " AND type = ?"
-            params.append(type_filter.value)
-        if project:
-            q += " AND project = ?"
-            params.append(project)
-        q += " ORDER BY updated DESC LIMIT ?"
-        params.append(limit)
-
-        rows = self._db.execute(q, params).fetchall()
-        return [m for mid in rows if (m := self.get(mid[0])) is not None]
-
-    def audit(
-        self,
-        topic: Optional[str] = None,
-        project: Optional[str] = None,
-    ) -> dict:
-        """Introspect: what do I know? What's stale? Stats."""
-        now = _now()
-
-        # Stats
-        total = self._db.execute("SELECT COUNT(*) FROM memories_meta").fetchone()[0]
-        by_type = {}
-        for row in self._db.execute(
-            "SELECT type, COUNT(*) FROM memories_meta GROUP BY type"
-        ).fetchall():
-            by_type[row[0]] = row[1]
-
-        # Stale: memories past 80% of their half-life
-        stale: list[Memory] = []
-        expired: list[Memory] = []
-        for md_file in self.memories_dir.glob("*.md"):
             try:
-                m = self._from_markdown(md_file.read_text())
-            except Exception:
+                memory: Memory = Memory.from_json(path.read_text())
+            except (json.JSONDecodeError, KeyError):
                 continue
-            if project and m.project != project:
-                continue
-            if m.expires and m.expires < now:
-                expired.append(m)
-                continue
-            age_days = (now - m.created).total_seconds() / 86400
-            hl = HALF_LIVES.get(m.type, 30)
-            if age_days > hl * 0.8:
-                stale.append(m)
+            age_days: float = max((now - memory.created).total_seconds() / 86400, 0)
+            freshness: float = 0.5 ** (age_days / memory.type.halflife)
+            score: float = rrf * memory.type.weight * memory.confidence * freshness
+            results.append(SearchResult(memory=memory, score=score))
 
-        result: dict = {
-            "stats": {"total": total, "by_type": by_type},
-            "stale": stale,
-            "expired": expired,
-        }
-
-        if topic:
-            result["relevant"] = [
-                mem for mem, _score in self.search(topic, limit=10, project=project)
-            ]
-
-        return result
-
-    # ------------------------------------------------------------------
-    # Rebuild
-    # ------------------------------------------------------------------
-
-    def rebuild_index(self) -> int:
-        """Rebuild the SQLite index from markdown files on disk."""
-        self._db.close()
-        if self.db_path.exists():
-            self.db_path.unlink()
-        self._init_db()
-
-        count = 0
-        for md_file in self.memories_dir.glob("*.md"):
-            try:
-                memory = self._from_markdown(md_file.read_text())
-                self._index_memory(memory)
-                count += 1
-            except Exception as exc:
-                print(f"warning: skipping {md_file.name}: {exc}")
-
-        self._db.commit()
-        return count
+        results.sort(key=lambda r: r.score, reverse=True)
+        return results[:limit]

@@ -3,5 +3,18 @@
     "allow": [
       "WebFetch(domain:pypi.org)"
     ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo curl -s -X POST http://localhost:8420/hook -H 'Content-Type: application/json' -d @-"
+          }
+        ]
+      }
+    ]
   }
 }
