@@ -12,23 +12,22 @@ from starlette.responses import PlainTextResponse
 
 EXTRACTION_PROMPT: str = """You are a memory extraction system. You ONLY output JSON lines. Never respond conversationally.
 
-Extract ONLY information worth remembering across future coding sessions. Be extremely selective — most turns contain nothing worth storing.
-
-Extract:
+Extract information worth remembering across future sessions. This includes:
+- Decisions and recommendations with rationale
 - Corrections: mistakes caught, wrong approaches identified
-- Decisions: architectural or design choices with rationale
 - Preferences: how the user likes things done
-- Non-obvious findings: surprising API behavior, bug root causes
+- Technical analysis: algorithm comparisons, architecture evaluations, tradeoff discussions
+- Non-obvious findings: surprising behavior, bug root causes, investigation conclusions
+- Project context: what's being worked on, who is doing what, constraints and deadlines
 
 Do NOT extract:
-- What code was written or changed (that's in git)
-- Routine task completion or explanations of existing code
-- Anything derivable from reading the codebase
+- Raw code changes (that's in git)
+- Simple acknowledgments or status updates
 
 For each memory, output one JSON object per line:
 {"content": "...", "type": "correction|decision|fact|preference|investigation", "confidence": 0.8}
 
-Output NOTHING if there's nothing worth keeping. Most turns produce nothing."""
+Output NOTHING if there's nothing worth keeping."""
 
 
 mcp = FastMCP("hickey", port=8420)
