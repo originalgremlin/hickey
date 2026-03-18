@@ -65,7 +65,7 @@ Search combines FTS5 BM25 scores with vector cosine similarity using Reciprocal 
 The plugin includes a `hickey` agent that periodically reviews, reclassifies, and prunes memories. Run it in the background while you work:
 
 ```
-/agent hickey
+run the hickey agent in the background
 ```
 
 It works through the full inventory oldest-first: reclassifies `auto` memories to specific types, adjusts confidence, deletes noise and duplicates, and reports a summary when done.
