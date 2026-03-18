@@ -6,10 +6,7 @@
   "plugins": [
     {
       "name": "hickey",
-      "source": {
-        "source": "subdirectory",
-        "path": "./plugins/hickey"
-      },
+      "source": "./plugins/hickey",
       "description": "A memory system that leaves a mark. Transparent auto-capture with hybrid FTS5 + vector search."
     }
   ]
