@@ -3,20 +3,14 @@ import json
 import os
 import typing as T
 from hickey import api
-from hickey.store import Memory, MemoryType, SearchResult
+from hickey.store import Memory, SearchResult
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
 
 mcp = FastMCP("hickey", port=8420)
-
-
-@mcp.tool()
-def index():
-    """Rebuild index from markdown files."""
-    api.store.index()
-    return "Rebuilding index."
+last_hash: str = ""
 
 
 @mcp.tool()
@@ -71,24 +65,25 @@ def search(
         return "No matching memories found."
 
 
-_last_hash: str = ""
-
-
 @mcp.custom_route("/hook", methods=["POST"])
 async def hook(request: Request) -> PlainTextResponse:
     """Claude Code stop hook. Stores assistant responses as memories."""
-    global _last_hash
+    global last_hash
+    # parse request body
     body: bytes = await request.body()
     data: dict = json.loads(body)
     message: str = data.get("last_assistant_message", "")
+    # filter immediate duplicates
     msg_hash: str = hashlib.md5(message.encode()).hexdigest()
-    if msg_hash == _last_hash:
+    if msg_hash == last_hash:
         return PlainTextResponse("skipped")
-    _last_hash = msg_hash
+    last_hash = msg_hash
+    # filter short messages
     if len(message) < 100 or data.get("stop_hook_active"):
         return PlainTextResponse("skipped")
+    # save the memory
     cwd: str = data.get("cwd", "")
     project: str = os.path.basename(cwd) if cwd else "unknown"
-    api.save(content=message, project=project, type="fact")
+    api.save(content=message, project=project, type="auto", auto=True, confidence=0.8)
     print(f"[hook] stored {len(message)} chars for project={project}", flush=True)
     return PlainTextResponse("ok")

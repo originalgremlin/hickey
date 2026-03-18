@@ -11,13 +11,9 @@ license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.0",
-    "mcp>=1.0",
-]
-
-[project.optional-dependencies]
-vectors = [
-    "sqlite-vec>=0.1.6",
     "fastembed>=0.4",
+    "mcp>=1.0",
+    "sqlite-vec>=0.1.6",
 ]
 
 [project.scripts]

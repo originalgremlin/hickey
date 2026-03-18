@@ -1,29 +1,67 @@
 import click
+import os
+import signal
+import subprocess
+import sys
 import typing as T
 from hickey import api
 from hickey.store import Memory, MemoryType, SearchResult
+from io import TextIOWrapper
+from pathlib import Path
+
+
+PIDFILE: Path = Path("/tmp/hickey.pid")
+OUTFILE: Path = Path("/tmp/hickey.out")
+
+def is_alive() -> tuple[bool, int]:
+    try:
+        pid: int = int(PIDFILE.read_text().strip())
+        os.kill(pid, 0)
+        return True, pid
+    except FileNotFoundError:
+        return False, 0
+    except OSError:
+        PIDFILE.unlink()
+        return False, 0
 
 
 @click.group(invoke_without_command=True)
 def main():
     """A memory system that leaves a mark."""
     if click.get_current_context().invoked_subcommand is None:
-        serve()
+        start()
 
 
 # admin commands
 @main.command()
-def serve():
-    """Start MCP server (HTTP)."""
-    from hickey.mcp import mcp
-    mcp.run(transport="streamable-http")
+def start():
+    """Start MCP server as a background daemon."""
+    alive, pid = is_alive()
+    if alive:
+        click.echo(f"Hickey server already running (pid {pid}).")
+    else:
+        logfile: TextIOWrapper = open(OUTFILE, "a")
+        proc: subprocess.Popen = subprocess.Popen(
+            [sys.executable, "-c", "from hickey.mcp import mcp; mcp.run(transport='streamable-http')"],
+            stdout=logfile,
+            stderr=logfile,
+            start_new_session=True,
+        )
+        PIDFILE.write_text(str(proc.pid))
+        click.echo(f"Hickey server started (pid {proc.pid}).")
 
 
 @main.command()
-def index():
-    """Rebuild index from markdown files."""
-    api.store.index()
-    click.echo("Rebuilding index.")
+def stop():
+    """Stop the MCP server daemon."""
+    alive, pid = is_alive()
+    if alive:
+        os.kill(pid, signal.SIGTERM)
+        PIDFILE.unlink()
+        click.echo(f"Hickey server stopped (pid {pid}).")
+    else:
+        click.echo("Hickey server is not running.")
+
 
 
 # client commands
@@ -43,7 +81,7 @@ def save(
     confidence: float,
 ):
     """Store a memory. Pass --id to revise an existing one."""
-    saved: Memory = api.save(content=content, id=id, type=type, project=project, tags=tags.split(","), confidence=confidence)
+    saved: Memory = api.save(content=content, id=id, type=type, project=project, tags=tags.split(",") if tags else [], confidence=confidence)
     click.echo(f"Stored {saved.id} ({saved.type.name.lower()})")
 
 
