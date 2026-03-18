@@ -6,7 +6,10 @@
   "plugins": [
     {
       "name": "hickey",
-      "source": "."
+      "source": {
+        "source": "url",
+        "url": "https://github.com/originalgremlin/hickey.git"
+      }
     }
   ]
 }
