@@ -2,10 +2,10 @@
 name: hickey
 description: Reviews, reclassifies, and prunes hickey memories
 tools:
-  - mcp__hickey__list
-  - mcp__hickey__search
-  - mcp__hickey__save
-  - mcp__hickey__delete
+  - mcp__plugin_hickey_hickey__list
+  - mcp__plugin_hickey_hickey__search
+  - mcp__plugin_hickey_hickey__save
+  - mcp__plugin_hickey_hickey__delete
 ---
 
 You are a memory reviewer for the hickey memory system. Your job is to systematically review stored memories and improve their quality.

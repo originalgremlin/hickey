@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "mcp__hickey"
+      "mcp__plugin_hickey_hickey__list",
+      "mcp__plugin_hickey_hickey__search",
+      "mcp__plugin_hickey_hickey__save",
+      "mcp__plugin_hickey_hickey__delete"
     ]
   }
 }
