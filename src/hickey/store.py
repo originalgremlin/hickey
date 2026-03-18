@@ -4,6 +4,7 @@ import uuid
 import sqlite_vec
 import typing as T
 from dataclasses import dataclass, field
+from functools import cached_property
 from datetime import datetime, timezone, MAXYEAR
 from enum import Enum
 from fastembed import TextEmbedding
@@ -60,8 +61,11 @@ class MemoryStore:
         self.base_dir: Path = Path(base_dir) if base_dir else Path.home() / ".hickey"
         self.db_path: Path = self.base_dir / "hickey.db"
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.embedder: TextEmbedding = TextEmbedding(EMBED_MODEL)
         self._init_db()
+
+    @cached_property
+    def embedder(self) -> TextEmbedding:
+        return TextEmbedding(EMBED_MODEL)
 
     def _init_db(self) -> None:
         self._db: sqlite3.Connection = sqlite3.connect(str(self.db_path))
