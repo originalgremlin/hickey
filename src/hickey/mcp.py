@@ -23,7 +23,7 @@ def save(
     confidence: float = 1.0,
 ) -> str:
     """Store a memory. Pass id to revise an existing one."""
-    saved: Memory = api.save(content=content, id=id, type=type, project=project, tags=tags, confidence=confidence)
+    saved: Memory = api.save(content=content, id=id, type=type, project=project, tags=tags, auto=False, confidence=confidence)
     return f"Stored {saved.id} ({saved.type.name.lower()})"
 
 

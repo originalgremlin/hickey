@@ -63,7 +63,6 @@ def stop():
         click.echo("Hickey server is not running.")
 
 
-
 # client commands
 @main.command()
 @click.argument("content")
@@ -81,7 +80,7 @@ def save(
     confidence: float,
 ):
     """Store a memory. Pass --id to revise an existing one."""
-    saved: Memory = api.save(content=content, id=id, type=type, project=project, tags=tags.split(",") if tags else [], confidence=confidence)
+    saved: Memory = api.save(content=content, id=id, type=type, project=project, tags=tags.split(",") if tags else [], auto=False, confidence=confidence)
     click.echo(f"Stored {saved.id} ({saved.type.name.lower()})")
 
 
