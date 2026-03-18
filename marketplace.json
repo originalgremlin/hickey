@@ -6,10 +6,7 @@
   "plugins": [
     {
       "name": "hickey",
-      "source": {
-        "source": "url",
-        "url": "https://github.com/originalgremlin/hickey.git"
-      }
+      "source": "./.claude-plugin"
     }
   ]
 }
