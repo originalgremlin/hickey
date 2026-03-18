@@ -1,8 +1,0 @@
-{
-  "name": "hickey",
-  "description": "A memory system that leaves a mark. Transparent auto-capture with hybrid FTS5 + vector search.",
-  "version": "0.1.0",
-  "author": {
-    "name": "Barry Shapira"
-  }
-}
