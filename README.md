@@ -7,8 +7,8 @@ Transparent memory capture for Claude Code. Every substantive response is stored
 ## Install
 
 ```bash
-# Install the package
-pip install git+https://github.com/originalgremlin/hickey.git
+# Install the package (requires Python 3.11+)
+uv tool install git+https://github.com/originalgremlin/hickey.git
 
 # Install the Claude Code plugin (auto-starts server, configures hooks)
 /plugin marketplace add originalgremlin/hickey
