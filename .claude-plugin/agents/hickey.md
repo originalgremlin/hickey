@@ -1,5 +1,5 @@
 ---
-name: memory-reviewer
+name: hickey
 description: Reviews, reclassifies, and prunes hickey memories
 tools:
   - mcp__hickey__list
