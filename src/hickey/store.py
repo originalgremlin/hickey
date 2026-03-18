@@ -179,6 +179,8 @@ class MemoryStore:
     ) -> T.List[SearchResult]:
         """Hybrid search: FTS5 BM25 + vector similarity, fused with RRF.
         Results are boosted by type weight, confidence, and freshness decay."""
+        if not query.strip():
+            return []
         overfetch: int = limit * 3
         now_iso: str = datetime.now(timezone.utc).isoformat()
 
