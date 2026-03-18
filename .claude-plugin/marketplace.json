@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "hickey",
-      "source": "./"
+      "source": "./plugin"
     }
   ]
 }
