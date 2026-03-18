@@ -3,13 +3,10 @@
   "owner": {
     "name": "Barry Shapira"
   },
-  "metadata": {
-    "pluginRoot": "./plugins"
-  },
   "plugins": [
     {
       "name": "hickey",
-      "source": "hickey",
+      "source": "./plugins/hickey",
       "description": "A memory system that leaves a mark. Transparent auto-capture with hybrid FTS5 + vector search."
     }
   ]
