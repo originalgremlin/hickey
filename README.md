@@ -13,6 +13,7 @@ uv tool install git+https://github.com/originalgremlin/hickey.git
 # Install the Claude Code plugin (auto-starts server, configures hooks)
 /plugin marketplace add originalgremlin/hickey
 /plugin install hickey
+/reload-plugins
 ```
 
 ## Manual setup (without plugin)
