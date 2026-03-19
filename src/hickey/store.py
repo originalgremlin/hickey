@@ -65,7 +65,7 @@ class MemoryStore:
         return TextEmbedding(EMBED_MODEL)
 
     def _init_db(self) -> None:
-        self._db: sqlite3.Connection = sqlite3.connect(str(self.db_path))
+        self._db: sqlite3.Connection = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.enable_load_extension(True)
         sqlite_vec.load(self._db)

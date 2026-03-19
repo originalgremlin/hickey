@@ -22,7 +22,7 @@ Five modules, same four verbs (save, delete, list, search):
 - **api.py** — Four functions that bridge store to frontends. Handles string→MemoryType conversion. Shared by CLI and MCP.
 - **mcp.py** — FastMCP server on port 8420 (streamable-http). Four MCP tools + `/hook` HTTP endpoint for SessionStart, PreCompact, and SessionEnd hooks.
 - **cli.py** — Click CLI. Admin: `start`, `stop`. Memory: `save`, `delete`, `list`, `search`.
-- **digest.py** — Reads Claude Code transcript JSONL, calls Haiku via `claude -p` to extract typed memories. Triggered by hooks on session boundaries. Tracks byte-offset watermarks per transcript to process incrementally.
+- **digest.py** — Reads Claude Code transcript JSONL, calls Haiku via `claude -p` to extract typed memories. Triggered by hooks on session boundaries. Tracks byte-offset watermarks per transcript to process incrementally. Chunks at 20K chars. All-or-nothing: if any chunk fails extraction, nothing is stored and the watermark stays put. A threading lock serializes all digest work since hooks fire from background threads.
 
 ## Design Constraints
 

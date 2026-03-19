@@ -2,7 +2,7 @@
 
 A memory system that leaves a mark.
 
-Transparent memory capture for Claude Code. Every substantive response is stored, indexed with FTS5 + vector embeddings, and searchable with hybrid BM25 + semantic similarity. Memories are ranked by type, confidence, and freshness decay.
+Persistent memory for Claude Code. On session boundaries, Haiku reads the full conversation transcript and extracts what's worth remembering — decisions, corrections, facts, preferences, investigations. Memories are indexed with FTS5 + vector embeddings and searchable with hybrid BM25 + semantic similarity, ranked by type weight, confidence, and freshness decay.
 
 ## Install
 
@@ -28,8 +28,10 @@ hickey start
 # Register MCP server with Claude Code
 claude mcp add --transport http hickey http://localhost:8420/mcp
 
-# Add stop hook to .claude/settings.local.json
-# "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "curl -s -X POST http://localhost:8420/hook -H 'Content-Type: application/json' -d @-"}]}]
+# Add hooks to .claude/settings.local.json
+# "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "hickey start 2>/dev/null || true"}, {"type": "http", "url": "http://localhost:8420/hook", "timeout": 120}]}]
+# "PreCompact": [{"matcher": "", "hooks": [{"type": "http", "url": "http://localhost:8420/hook", "timeout": 120}]}]
+# "SessionEnd": [{"matcher": "", "hooks": [{"type": "http", "url": "http://localhost:8420/hook", "timeout": 120}]}]
 ```
 
 ## CLI
@@ -52,23 +54,15 @@ hickey search "database architecture"
 
 ## How it works
 
-Every assistant response over 100 characters is automatically stored via a Claude Code stop hook. Memories are saved to SQLite with three indexes:
+On session start, context compaction, and session end, a hook sends the transcript path to the hickey server. The digest system reads new transcript content since the last watermark, passes it to Haiku via `claude -p`, and stores any memories Haiku extracts. This means only what's worth remembering gets stored — not raw responses.
+
+Memories live in SQLite with three indexes:
 
 - **memories** — primary table with all fields
 - **memories_fts** — FTS5 full-text search (porter stemming)
 - **memories_vec** — vector embeddings (BAAI/bge-small-en-v1.5, 384-dim)
 
 Search combines FTS5 BM25 scores with vector cosine similarity using Reciprocal Rank Fusion, then boosts by type weight, confidence, and freshness decay.
-
-## Memory review agent
-
-The plugin includes a `hickey` agent that periodically reviews, reclassifies, and prunes memories. Run it in the background while you work:
-
-```
-run the hickey agent in the background
-```
-
-It works through the full inventory oldest-first: reclassifies `auto` memories to specific types, adjusts confidence, deletes noise and duplicates, and reports a summary when done.
 
 ## Memory types
 
@@ -79,7 +73,6 @@ It works through the full inventory oldest-first: reclassifies `auto` memories t
 | preference | 1.1 | 60 days | How the user likes things done |
 | fact | 1.0 | 30 days | Verified information |
 | investigation | 0.8 | 21 days | Research findings, comparisons |
-| auto | 0.7 | 45 days | Unclassified (hook-captured) |
 
 ## License
 

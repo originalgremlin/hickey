@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import typing as T
 from hickey import api
 from hickey import digest
@@ -77,10 +78,10 @@ async def hook(request: Request) -> JSONResponse:
     cwd: str = data.get("cwd", "")
     project: str = os.path.basename(cwd) if cwd else "unknown"
     digest.register(transcript_path, project)
-    # summarize the transcript
+    # summarize the transcript in background (avoid blocking the event loop)
     match data.get("hook_event_name", ""):
         case "SessionStart":
-            digest.digest_all()
+            threading.Thread(target=digest.digest_all, daemon=True).start()
         case "PreCompact" | "SessionEnd":
-            digest.digest(transcript_path)
+            threading.Thread(target=digest.digest, args=(transcript_path,), daemon=True).start()
     return JSONResponse({})

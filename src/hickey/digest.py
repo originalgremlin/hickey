@@ -1,11 +1,13 @@
 import json
 import subprocess
+import threading
 from pathlib import Path
 from hickey import api
 
 
 MAX_TOOL_OUTPUT: int = 2000
-MAX_CONVERSATION: int = 100_000
+MAX_CHUNK: int = 20_000
+_lock: threading.Lock = threading.Lock()
 VALID_TYPES: set[str] = {"correction", "decision", "fact", "preference", "investigation"}
 
 
@@ -39,27 +41,31 @@ def register(transcript_path: str, project: str) -> None:
 
 def digest(transcript_path: str) -> int:
     """Digest new content from a specific transcript. Returns memories stored."""
-    wm: tuple[int, str] | None = api.store.get_watermark(transcript_path)
-    if not wm:
-        return 0
-    offset, project = wm
-    count, new_offset = _digest_one(transcript_path, project, offset)
-    api.store.set_watermark(transcript_path, new_offset, project)
-    return count
+    with _lock:
+        wm: tuple[int, str] | None = api.store.get_watermark(transcript_path)
+        if not wm:
+            return 0
+        offset, project = wm
+        count, new_offset = _digest_one(transcript_path, project, offset)
+        api.store.set_watermark(transcript_path, new_offset, project)
+        return count
 
 
 def digest_all() -> int:
     """Digest all registered transcripts. Returns total memories stored."""
-    total: int = 0
-    for path, offset, project in api.store.all_watermarks():
-        count, new_offset = _digest_one(path, project, offset)
-        api.store.set_watermark(path, new_offset, project)
-        total += count
-    return total
+    with _lock:
+        total: int = 0
+        for path, offset, project in api.store.all_watermarks():
+            count, new_offset = _digest_one(path, project, offset)
+            api.store.set_watermark(path, new_offset, project)
+            total += count
+        return total
 
 
 def _digest_one(path: str, project: str, offset: int) -> tuple[int, int]:
-    """Read new content from one transcript and extract memories."""
+    """Read new content from one transcript and extract memories.
+    Chunks the conversation to avoid timeouts. All-or-nothing: if any chunk
+    fails extraction, no memories are stored and the watermark stays put."""
     p: Path = Path(path).expanduser()
     if not p.exists():
         return 0, offset
@@ -69,25 +75,44 @@ def _digest_one(path: str, project: str, offset: int) -> tuple[int, int]:
         new_offset: int = f.tell()
     if not raw.strip():
         return 0, new_offset
-    conversation: str = _parse_transcript(raw)
-    if not conversation:
+    segments: list[str] = _parse_transcript(raw)
+    if not segments:
         return 0, new_offset
-    memories: list[dict] = _extract(conversation)
-    for mem in memories:
+    # Extract from all chunks first, store only if all succeed
+    all_memories: list[dict] = []
+    chunk: list[str] = []
+    chunk_len: int = 0
+    for seg in segments:
+        if chunk and chunk_len + len(seg) > MAX_CHUNK:
+            memories: list[dict] | None = _extract("\n\n".join(chunk))
+            if memories is None:
+                return 0, offset
+            all_memories.extend(memories)
+            chunk = []
+            chunk_len = 0
+        chunk.append(seg)
+        chunk_len += len(seg)
+    if chunk:
+        memories = _extract("\n\n".join(chunk))
+        if memories is None:
+            return 0, offset
+        all_memories.extend(memories)
+    # All chunks succeeded — store everything
+    for mem in all_memories:
         api.save(
             content=mem["content"],
             type=mem.get("type", "fact"),
             project=project,
             confidence=mem.get("confidence", 0.8),
         )
-    if memories:
-        print(f"[digest] stored {len(memories)} memories for project={project}", flush=True)
-    return len(memories), new_offset
+    if all_memories:
+        print(f"[digest] stored {len(all_memories)} memories for project={project}", flush=True)
+    return len(all_memories), new_offset
 
 
-def _parse_transcript(raw: str) -> str:
-    """Parse JSONL transcript into a readable conversation."""
-    lines: list[str] = []
+def _parse_transcript(raw: str) -> list[str]:
+    """Parse JSONL transcript into conversation segments (one per turn)."""
+    segments: list[str] = []
     for line in raw.strip().split("\n"):
         if not line.strip():
             continue
@@ -101,22 +126,19 @@ def _parse_transcript(raw: str) -> str:
         if t == "user":
             text: str = _parse_user(entry)
             if text:
-                lines.append(f"user: {text}")
+                segments.append(f"user: {text}")
         elif t == "assistant":
             text = _parse_assistant(entry)
             if text:
-                lines.append(f"assistant: {text}")
-    result: str = "\n\n".join(lines)
-    if len(result) > MAX_CONVERSATION:
-        result = result[-MAX_CONVERSATION:]
-    return result
+                segments.append(f"assistant: {text}")
+    return segments
 
 
 def _parse_user(entry: dict) -> str:
     """Extract text from a user transcript entry."""
     content = entry.get("message", {}).get("content", "")
     if isinstance(content, str):
-        if any(tag in content for tag in ("<system-reminder>", "<local-command-caveat>", "<command-name>")):
+        if any(tag in content for tag in ("<system-reminder>", "<local-command-caveat>", "<command-name>", "<local-command-stdout>")):
             return ""
         return content
     if isinstance(content, list):
@@ -157,8 +179,9 @@ def _parse_assistant(entry: dict) -> str:
     return "\n".join(parts)
 
 
-def _extract(conversation: str) -> list[dict]:
-    """Call claude CLI to extract memories from conversation."""
+def _extract(conversation: str) -> list[dict] | None:
+    """Call claude CLI to extract memories from conversation.
+    Returns list on success (possibly empty), None on failure."""
     full_input: str = f"{PROMPT}\n\n---\n\n{conversation}"
     try:
         result: subprocess.CompletedProcess = subprocess.run(
@@ -169,9 +192,13 @@ def _extract(conversation: str) -> list[dict]:
             timeout=120,
         )
         text: str = result.stdout.strip()
+        if result.returncode != 0 or not text:
+            stderr: str = result.stderr.strip()[:200] if result.stderr else ""
+            print(f"[digest] claude returned code={result.returncode} stderr={stderr}", flush=True)
+            return None
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         print(f"[digest] claude call failed: {e}", flush=True)
-        return []
+        return None
     # strip markdown code fences if present
     if text.startswith("```"):
         text = text.split("```")[1]
@@ -188,4 +215,4 @@ def _extract(conversation: str) -> list[dict]:
             ]
     except json.JSONDecodeError:
         print(f"[digest] failed to parse: {text[:200]}", flush=True)
-    return []
+    return None
