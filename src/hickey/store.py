@@ -5,7 +5,7 @@ import sqlite_vec
 import typing as T
 from dataclasses import dataclass, field
 from functools import cached_property
-from datetime import datetime, timezone, MAXYEAR
+from datetime import datetime, timezone
 from enum import Enum
 from fastembed import TextEmbedding
 from pathlib import Path
@@ -21,7 +21,6 @@ class MemoryType(Enum):
     FACT          = (1.0, 30)
     PREFERENCE    = (1.1, 60)
     INVESTIGATION = (0.8, 21)
-    AUTO          = (0.7, 45)
 
     def __init__(self, weight: float, halflife: int):
         self.weight = weight
@@ -35,11 +34,9 @@ class Memory:
     type: MemoryType = MemoryType.FACT
     project: str = field(default_factory=lambda: os.path.basename(os.getcwd()))
     tags: list[str] = field(default_factory=list)
-    auto: bool = False
     confidence: float = 1.0
     created: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    expires: datetime = field(default_factory=lambda: datetime(MAXYEAR, 12, 31, 23, 59, 59, 999999))
 
     def __repr__(self) -> str:
         age: int = (datetime.now(timezone.utc) - self.created).days
@@ -79,11 +76,9 @@ class MemoryStore:
                 type       TEXT NOT NULL,
                 project    TEXT NOT NULL,
                 tags       TEXT NOT NULL DEFAULT '',
-                auto       INTEGER NOT NULL DEFAULT 0,
                 confidence REAL NOT NULL DEFAULT 1.0,
                 created    TEXT NOT NULL,
-                updated    TEXT NOT NULL,
-                expires    TEXT NOT NULL
+                updated    TEXT NOT NULL
             )
         """)
         self._db.execute("""
@@ -98,6 +93,13 @@ class MemoryStore:
                 embedding float[{EMBED_DIM}]
             )
         """)
+        self._db.execute("""
+            CREATE TABLE IF NOT EXISTS watermarks (
+                transcript_path TEXT PRIMARY KEY,
+                byte_offset     INTEGER NOT NULL DEFAULT 0,
+                project         TEXT NOT NULL
+            )
+        """)
         self._db.commit()
 
     def _embed(self, text: str) -> bytes:
@@ -110,14 +112,12 @@ class MemoryStore:
             type=MemoryType[row[2].upper()],
             project=row[3],
             tags=row[4].split(",") if row[4] else [],
-            auto=bool(row[5]),
-            confidence=row[6],
-            created=datetime.fromisoformat(row[7]),
-            updated=datetime.fromisoformat(row[8]),
-            expires=datetime.fromisoformat(row[9]),
+            confidence=row[5],
+            created=datetime.fromisoformat(row[6]),
+            updated=datetime.fromisoformat(row[7]),
         )
 
-    _MEMORY_COLS: str = "id, content, type, project, tags, auto, confidence, created, updated, expires"
+    _MEMORY_COLS: str = "id, content, type, project, tags, confidence, created, updated"
 
     def save(
         self,
@@ -126,10 +126,10 @@ class MemoryStore:
         """Insert or replace a memory."""
         memory.updated = datetime.now(timezone.utc)
         self._db.execute(
-            f"INSERT OR REPLACE INTO memories ({self._MEMORY_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT OR REPLACE INTO memories ({self._MEMORY_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (memory.id, memory.content, memory.type.name.lower(), memory.project,
-             ",".join(memory.tags), int(memory.auto), memory.confidence,
-             memory.created.isoformat(), memory.updated.isoformat(), memory.expires.isoformat()),
+             ",".join(memory.tags), memory.confidence,
+             memory.created.isoformat(), memory.updated.isoformat()),
         )
         self._db.execute("DELETE FROM memories_fts WHERE id = ?", (memory.id,))
         self._db.execute(
@@ -186,17 +186,18 @@ class MemoryStore:
         if not query.strip():
             return []
         overfetch: int = limit * 3
-        now_iso: str = datetime.now(timezone.utc).isoformat()
 
-        # Build filter clause
-        where: str = "m.expires > ?"
-        where_params: list = [now_iso]
+        # Build filter clauses (aliased for JOINs, bare for direct queries)
+        filters: list[str] = []
+        where_params: list = []
         if type:
-            where += " AND m.type = ?"
+            filters.append("type = ?")
             where_params.append(type.name.lower())
         if project:
-            where += " AND m.project = ?"
+            filters.append("project = ?")
             where_params.append(project)
+        bare_where: str = " AND ".join(["1=1", *filters])
+        aliased_where: str = " AND ".join(["1=1", *[f"m.{f}" for f in filters]])
 
         # FTS5 ranked list (joined with memories to pre-filter)
         fts_ranked: T.List[str] = []
@@ -206,7 +207,7 @@ class MemoryStore:
                 rows = self._db.execute(
                     f"""SELECT f.id FROM memories_fts f
                         JOIN memories m ON f.id = m.id
-                        WHERE memories_fts MATCH ? AND {where}
+                        WHERE memories_fts MATCH ? AND {aliased_where}
                         ORDER BY f.rank LIMIT ?""",
                     (fts_query, *where_params, overfetch),
                 ).fetchall()
@@ -235,7 +236,7 @@ class MemoryStore:
         # Filter vec-only candidates against memories table
         placeholders: str = ",".join("?" * len(rrf_scores))
         valid_rows = self._db.execute(
-            f"SELECT id FROM memories WHERE id IN ({placeholders}) AND {where.replace('m.', '')}",
+            f"SELECT id FROM memories WHERE id IN ({placeholders}) AND {bare_where}",
             (*rrf_scores.keys(), *where_params),
         ).fetchall()
         valid_ids: set = {r[0] for r in valid_rows}
@@ -260,3 +261,25 @@ class MemoryStore:
 
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:limit]
+
+    def get_watermark(self, transcript_path: str) -> T.Optional[tuple[int, str]]:
+        """Get (byte_offset, project) for a transcript, or None."""
+        row = self._db.execute(
+            "SELECT byte_offset, project FROM watermarks WHERE transcript_path = ?",
+            (transcript_path,),
+        ).fetchone()
+        return (row[0], row[1]) if row else None
+
+    def set_watermark(self, transcript_path: str, byte_offset: int, project: str) -> None:
+        """Upsert watermark for a transcript."""
+        self._db.execute(
+            "INSERT OR REPLACE INTO watermarks (transcript_path, byte_offset, project) VALUES (?, ?, ?)",
+            (transcript_path, byte_offset, project),
+        )
+        self._db.commit()
+
+    def all_watermarks(self) -> T.List[tuple[str, int, str]]:
+        """Return all (transcript_path, byte_offset, project) tuples."""
+        return self._db.execute(
+            "SELECT transcript_path, byte_offset, project FROM watermarks"
+        ).fetchall()

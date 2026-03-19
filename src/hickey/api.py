@@ -11,10 +11,9 @@ def save(
     type: str = "fact",
     project: T.Optional[str] = None,
     tags: T.Optional[list[str]] = None,
-    auto: bool = False,
     confidence: float = 1.0,
 ) -> Memory:
-    memory: Memory = Memory(content=content, type=MemoryType[type.upper()], tags=tags or [], auto=auto, confidence=confidence)
+    memory: Memory = Memory(content=content, type=MemoryType[type.upper()], tags=tags or [], confidence=confidence)
     memory.id = id or memory.id
     memory.project = project or memory.project
     return store.save(memory)

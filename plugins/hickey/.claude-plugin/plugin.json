@@ -2,28 +2,43 @@
   "name": "hickey",
   "description": "A memory system that leaves a mark. Transparent auto-capture with hybrid FTS5 + vector search.",
   "version": "0.1.0",
-  "agents": [
-    "./agents/hickey.md"
-  ],
   "hooks": {
     "SessionStart": [
-      {
-        "matcher": "startup",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "hickey start 2>/dev/null || true"
-          }
-        ]
-      }
-    ],
-    "Stop": [
       {
         "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "curl -s -X POST http://localhost:8420/hook -H 'Content-Type: application/json' -d @-"
+            "command": "hickey start 2>/dev/null || true"
+          },
+          {
+            "type": "http",
+            "url": "http://localhost:8420/hook",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://localhost:8420/hook",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://localhost:8420/hook",
+            "timeout": 120
           }
         ]
       }

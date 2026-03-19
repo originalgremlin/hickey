@@ -30,7 +30,6 @@ class TestCRUD:
             tags=["design", "decay"],
             project="hickey",
             confidence=0.95,
-            auto=True,
         )
         store.save(m)
         loaded = store.list()[0]
@@ -40,7 +39,6 @@ class TestCRUD:
         assert loaded.tags == ["design", "decay"]
         assert loaded.project == "hickey"
         assert loaded.confidence == 0.95
-        assert loaded.auto is True
 
     def test_save_updates_existing(self, store):
         m = store.save(Memory(content="Original.", type=MemoryType.FACT))
