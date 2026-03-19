@@ -25,12 +25,13 @@ Rules:
 - Skip: greetings, status updates, routine tool output, code already in files.
 - Skip: anything derivable by reading the current codebase or git history.
 - Each memory must be self-contained — understandable without this conversation.
-- Be detailed: include the problem, the root cause, the fix or decision, and the rationale. A future reader should understand not just WHAT but WHY. 2-4 sentences is ideal.
+- Be detailed: include the problem, the root cause, the fix or decision, and the rationale. A future reader should understand not just WHAT but WHY.
+- Each memory content MUST be 200-500 characters. If shorter, add more context. If longer, tighten.
 - Fewer, higher-quality memories. When in doubt, don't store.
 - Set confidence 0.5-1.0 based on how certain/validated the information is.
 
 Return ONLY a JSON array:
-[{"type": "decision", "content": "...", "confidence": 0.9}]
+[{"type": "decision", "content": "We chose X over Y because Z. The tradeoff was A vs B. This matters when...", "confidence": 0.9}]
 Or if nothing worth storing: []"""
 
 
