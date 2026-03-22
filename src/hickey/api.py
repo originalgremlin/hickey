@@ -1,11 +1,8 @@
 import typing as T
-from hickey.cache import WebfetchCache
 from hickey.store import Memory, MemoryType, MemoryStore, SearchResult
-from pathlib import Path
 
 
 store: MemoryStore = MemoryStore()
-cache: WebfetchCache = WebfetchCache()
 
 
 def save(

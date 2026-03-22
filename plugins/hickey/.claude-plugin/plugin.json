@@ -42,30 +42,6 @@
           }
         ]
       }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "WebFetch",
-        "hooks": [
-          {
-            "type": "http",
-            "url": "http://localhost:8420/hook/pre-webfetch",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "WebFetch",
-        "hooks": [
-          {
-            "type": "http",
-            "url": "http://localhost:8420/hook/post-webfetch",
-            "timeout": 5
-          }
-        ]
-      }
     ]
   },
   "mcpServers": {

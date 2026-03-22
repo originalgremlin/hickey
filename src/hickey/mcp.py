@@ -2,7 +2,6 @@ import json
 import os
 import threading
 import typing as T
-from datetime import datetime, timezone
 from hickey import api
 from hickey import digest
 from hickey.store import Memory, SearchResult
@@ -14,7 +13,6 @@ from starlette.responses import JSONResponse
 mcp = FastMCP("hickey", port=8420)
 
 
-# real-time interaction
 @mcp.tool()
 def save(
     content: str,
@@ -67,7 +65,6 @@ def search(
         return "No matching memories found."
 
 
-# automation hooks
 @mcp.custom_route("/hook", methods=["POST"])
 async def hook(request: Request) -> JSONResponse:
     """Claude Code hook. Digests transcripts on session boundaries."""
@@ -85,42 +82,6 @@ async def hook(request: Request) -> JSONResponse:
     match data.get("hook_event_name", ""):
         case "SessionStart":
             threading.Thread(target=digest.digest_all, daemon=True).start()
-            threading.Thread(target=api.cache.prune, daemon=True).start()
         case "PreCompact" | "SessionEnd":
             threading.Thread(target=digest.digest, args=(transcript_path,), daemon=True).start()
-    return JSONResponse({})
-
-
-@mcp.custom_route("/hook/pre-webfetch", methods=["POST"])
-async def pre_webfetch(request: Request) -> JSONResponse:
-    """PreToolUse hook for WebFetch. Returns cached content if available."""
-    body: bytes = await request.body()
-    data: dict = json.loads(body)
-    url: str = data.get("tool_input", {}).get("url", "")
-    if not url:
-        return JSONResponse({})
-    result = api.cache.get(url)
-    if result is None:
-        return JSONResponse({})
-    entry, content = result
-    text: str = content.decode("utf-8", errors="replace")
-    age: int = int((datetime.now(timezone.utc) - entry.fetched_at).total_seconds())
-    return JSONResponse({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": f"[hickey cache hit — fetched {age}s ago, {entry.size_bytes} bytes]\n\n{text}",
-        }
-    })
-
-
-@mcp.custom_route("/hook/post-webfetch", methods=["POST"])
-async def post_webfetch(request: Request) -> JSONResponse:
-    """PostToolUse hook for WebFetch. Caches the fetched content."""
-    body: bytes = await request.body()
-    data: dict = json.loads(body)
-    url: str = data.get("tool_input", {}).get("url", "")
-    tool_output: str = data.get("tool_output", "")
-    if url and tool_output:
-        api.cache.put(url, tool_output.encode("utf-8"))
     return JSONResponse({})
