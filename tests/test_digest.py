@@ -25,111 +25,95 @@ def _patch_store(tmp_path):
 
 class TestWatermarks:
     def test_get_nonexistent(self):
-        assert api.store.get_watermark("/no/such/path") is None
+        assert api.store.get_watermark("/no/such/path") == 0
 
     def test_set_and_get(self):
-        api.store.set_watermark("/tmp/t.jsonl", 42, "myproject")
-        wm = api.store.get_watermark("/tmp/t.jsonl")
-        assert wm == (42, "myproject")
+        api.store.set_watermark("/tmp/t.jsonl", 42)
+        assert api.store.get_watermark("/tmp/t.jsonl") == 42
 
     def test_upsert(self):
-        api.store.set_watermark("/tmp/t.jsonl", 0, "proj")
-        api.store.set_watermark("/tmp/t.jsonl", 100, "proj")
-        assert api.store.get_watermark("/tmp/t.jsonl") == (100, "proj")
-
-    def test_all_watermarks(self):
-        api.store.set_watermark("/a.jsonl", 10, "alpha")
-        api.store.set_watermark("/b.jsonl", 20, "beta")
-        wms = api.store.all_watermarks()
-        assert len(wms) == 2
-        paths = {w[0] for w in wms}
-        assert paths == {"/a.jsonl", "/b.jsonl"}
-
-
-class TestRegister:
-    def test_register_creates_watermark(self):
-        digest.register("/tmp/t.jsonl", "proj")
-        assert api.store.get_watermark("/tmp/t.jsonl") == (0, "proj")
-
-    def test_register_idempotent(self):
-        digest.register("/tmp/t.jsonl", "proj")
-        api.store.set_watermark("/tmp/t.jsonl", 99, "proj")
-        digest.register("/tmp/t.jsonl", "proj")
-        assert api.store.get_watermark("/tmp/t.jsonl") == (99, "proj")
+        api.store.set_watermark("/tmp/t.jsonl", 0)
+        api.store.set_watermark("/tmp/t.jsonl", 100)
+        assert api.store.get_watermark("/tmp/t.jsonl") == 100
 
 
 class TestParseTranscript:
     def _make_jsonl(self, entries: list[dict]) -> str:
         return "\n".join(json.dumps(e) for e in entries)
 
-    def _joined(self, entries: list[dict]) -> str:
-        return "\n\n".join(digest._parse_transcript(self._make_jsonl(entries)))
-
     def test_user_text(self):
-        result = self._joined([
+        result = digest._parse_transcript(self._make_jsonl([
             {"type": "user", "message": {"role": "user", "content": "hello world"}},
-        ])
+        ]))
         assert "user: hello world" in result
 
     def test_assistant_text(self):
-        result = self._joined([
+        result = digest._parse_transcript(self._make_jsonl([
             {"type": "assistant", "message": {"role": "assistant", "content": [
                 {"type": "text", "text": "here is my response"}
             ]}},
-        ])
+        ]))
         assert "assistant: here is my response" in result
 
     def test_tool_use(self):
-        result = self._joined([
+        result = digest._parse_transcript(self._make_jsonl([
             {"type": "assistant", "message": {"role": "assistant", "content": [
                 {"type": "tool_use", "name": "Read", "input": {"file_path": "/foo.py"}}
             ]}},
-        ])
+        ]))
         assert "[tool: Read(" in result
         assert "/foo.py" in result
 
     def test_tool_result(self):
-        result = self._joined([
+        result = digest._parse_transcript(self._make_jsonl([
             {"type": "user", "message": {"role": "user", "content": [
                 {"type": "tool_result", "content": "file contents here", "is_error": False}
             ]}},
-        ])
+        ]))
         assert "[tool_result: file contents here]" in result
 
     def test_skips_system_reminder(self):
         result = digest._parse_transcript(self._make_jsonl([
             {"type": "user", "message": {"role": "user", "content": "<system-reminder>secret</system-reminder>"}},
         ]))
-        assert result == []
+        assert result == ""
 
     def test_skips_meta(self):
         result = digest._parse_transcript(self._make_jsonl([
             {"type": "user", "isMeta": True, "message": {"role": "user", "content": "should be skipped"}},
         ]))
-        assert result == []
+        assert result == ""
 
     def test_skips_non_message_types(self):
-        result = self._joined([
+        result = digest._parse_transcript(self._make_jsonl([
             {"type": "file-history-snapshot", "snapshot": {}},
             {"type": "progress", "content": "thinking..."},
             {"type": "user", "message": {"role": "user", "content": "real message"}},
-        ])
+        ]))
         assert "real message" in result
         assert "snapshot" not in result
         assert "thinking" not in result
 
     def test_truncates_long_tool_result(self):
         long_content = "x" * 3000
-        result = self._joined([
+        result = digest._parse_transcript(self._make_jsonl([
             {"type": "user", "message": {"role": "user", "content": [
                 {"type": "tool_result", "content": long_content, "is_error": False}
             ]}},
-        ])
+        ]))
         assert "[truncated]" in result
         assert len(result) < 3000
 
+    def test_skips_digest_prompt_echo(self):
+        result = digest._parse_transcript(self._make_jsonl([
+            {"type": "user", "message": {"role": "user", "content": "You are a memory extraction system. Given a chunk..."}},
+            {"type": "user", "message": {"role": "user", "content": "real question here"}},
+        ]))
+        assert "memory extraction system" not in result
+        assert "real question here" in result
 
-class TestDigestOne:
+
+class TestDigest:
     def _write_transcript(self, tmp_path: Path, entries: list[dict]) -> Path:
         p = tmp_path / "transcript.jsonl"
         p.write_text("\n".join(json.dumps(e) for e in entries))
@@ -138,13 +122,10 @@ class TestDigestOne:
     def test_empty_transcript(self, tmp_path):
         p = tmp_path / "transcript.jsonl"
         p.write_text("")
-        count, offset = digest._digest_one(str(p), "proj", 0)
-        assert count == 0
+        assert digest.digest(str(p), "proj") == 0
 
     def test_nonexistent_file(self):
-        count, offset = digest._digest_one("/no/such/file.jsonl", "proj", 0)
-        assert count == 0
-        assert offset == 0
+        assert digest.digest("/no/such/file.jsonl", "proj") == 0
 
     @patch("hickey.digest._extract")
     def test_calls_extract_and_stores(self, mock_extract, tmp_path):
@@ -157,9 +138,7 @@ class TestDigestOne:
                 {"type": "text", "text": "SQLite is the right choice here."}
             ]}},
         ])
-        count, offset = digest._digest_one(str(p), "testproj", 0)
-        assert count == 1
-        assert offset > 0
+        assert digest.digest(str(p), "testproj") == 1
         memories = api.store.list()
         assert len(memories) == 1
         assert memories[0].content == "Use SQLite for storage."
@@ -168,34 +147,12 @@ class TestDigestOne:
 
     @patch("hickey.digest._extract")
     def test_extraction_failure_preserves_offset(self, mock_extract, tmp_path):
-        mock_extract.return_value = None  # extraction failed
+        mock_extract.return_value = None
         p = self._write_transcript(tmp_path, [
             {"type": "user", "message": {"role": "user", "content": "important stuff"}},
         ])
-        count, offset = digest._digest_one(str(p), "proj", 0)
-        assert count == 0
-        assert offset == 0  # watermark should NOT advance
-
-    @patch("hickey.digest._extract")
-    def test_partial_failure_stores_nothing(self, mock_extract, tmp_path):
-        """If any chunk fails, no memories are stored (all-or-nothing)."""
-        # First chunk succeeds, second fails
-        mock_extract.side_effect = [
-            [{"type": "fact", "content": "from chunk 1", "confidence": 0.9}],
-            None,  # second chunk fails
-        ]
-        # Create a transcript large enough to require multiple chunks
-        entries = []
-        for i in range(200):
-            entries.append({"type": "user", "message": {"role": "user", "content": f"message {i} " + "x" * 200}})
-            entries.append({"type": "assistant", "message": {"role": "assistant", "content": [
-                {"type": "text", "text": f"response {i} " + "y" * 200}
-            ]}})
-        p = self._write_transcript(tmp_path, entries)
-        count, offset = digest._digest_one(str(p), "proj", 0)
-        assert count == 0
-        assert offset == 0  # watermark stays put
-        assert api.store.list() == []  # nothing stored
+        digest.digest(str(p), "proj")
+        assert api.store.get_watermark(str(p)) == 0
 
     @patch("hickey.digest._extract")
     def test_incremental_offset(self, mock_extract, tmp_path):
@@ -203,14 +160,23 @@ class TestDigestOne:
         p = self._write_transcript(tmp_path, [
             {"type": "user", "message": {"role": "user", "content": "first chunk"}},
         ])
-        _, offset1 = digest._digest_one(str(p), "proj", 0)
-        # append more
+        digest.digest(str(p), "proj")
+        offset1 = api.store.get_watermark(str(p))
+        assert offset1 > 0
         with open(p, "a") as f:
             f.write("\n" + json.dumps({"type": "user", "message": {"role": "user", "content": "second chunk"}}))
         mock_extract.return_value = [{"type": "fact", "content": "from second chunk", "confidence": 0.7}]
-        count, offset2 = digest._digest_one(str(p), "proj", offset1)
-        assert offset2 > offset1
-        assert count == 1
+        assert digest.digest(str(p), "proj") == 1
+        assert api.store.get_watermark(str(p)) > offset1
+
+    @patch("hickey.digest._extract")
+    def test_advances_watermark_on_empty_conversation(self, mock_extract, tmp_path):
+        p = self._write_transcript(tmp_path, [
+            {"type": "progress", "content": "thinking..."},
+        ])
+        digest.digest(str(p), "proj")
+        assert api.store.get_watermark(str(p)) > 0
+        mock_extract.assert_not_called()
 
 
 def _mock_result(stdout: str, returncode: int = 0, stderr: str = "") -> object:
@@ -223,46 +189,50 @@ class TestExtract:
         mock_run.return_value = _mock_result(
             '[{"type": "fact", "content": "SQLite is fast.", "confidence": 0.9}]'
         )
-        result = digest._extract("some conversation")
+        result = digest._extract("some conversation", "proj")
         assert len(result) == 1
         assert result[0]["content"] == "SQLite is fast."
 
     @patch("subprocess.run")
-    def test_parses_fenced_json(self, mock_run):
+    def test_parses_json_wrapped_in_prose(self, mock_run):
         mock_run.return_value = _mock_result(
-            '```json\n[{"type": "decision", "content": "Use RRF.", "confidence": 0.8}]\n```'
+            'Here are the memories:\n\n[{"type": "decision", "content": "Use RRF.", "confidence": 0.8}]\n\nThese are important.'
         )
-        result = digest._extract("some conversation")
+        result = digest._extract("some conversation", "proj")
         assert len(result) == 1
 
     @patch("subprocess.run")
     def test_empty_array(self, mock_run):
         mock_run.return_value = _mock_result("[]")
-        result = digest._extract("boring conversation")
-        assert result == []
+        assert digest._extract("boring conversation", "proj") == []
 
     @patch("subprocess.run")
     def test_filters_invalid_types(self, mock_run):
         mock_run.return_value = _mock_result(
             '[{"type": "bogus", "content": "nope"}, {"type": "fact", "content": "yes", "confidence": 0.8}]'
         )
-        result = digest._extract("conversation")
+        result = digest._extract("conversation", "proj")
         assert len(result) == 1
         assert result[0]["type"] == "fact"
 
     @patch("subprocess.run")
     def test_handles_malformed_output(self, mock_run):
         mock_run.return_value = _mock_result("not json at all")
-        result = digest._extract("conversation")
-        assert result is None
+        assert digest._extract("conversation", "proj") is None
 
     @patch("subprocess.run")
     def test_handles_nonzero_exit(self, mock_run):
         mock_run.return_value = _mock_result("", returncode=1, stderr="rate limited")
-        result = digest._extract("conversation")
-        assert result is None
+        assert digest._extract("conversation", "proj") is None
 
     @patch("subprocess.run", side_effect=FileNotFoundError("claude not found"))
     def test_handles_missing_claude(self, mock_run):
-        result = digest._extract("conversation")
-        assert result is None
+        assert digest._extract("conversation", "proj") is None
+
+    @patch("subprocess.run")
+    def test_passes_project_to_prompt(self, mock_run):
+        mock_run.return_value = _mock_result("[]")
+        digest._extract("conversation", "myproject")
+        call_args = mock_run.call_args
+        system_prompt = call_args[0][0][call_args[0][0].index("--system-prompt") + 1]
+        assert "myproject" in system_prompt

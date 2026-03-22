@@ -2,14 +2,17 @@
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
-from hickey.store import Memory, MemoryType, MemoryStore, SearchResult
+from hickey.store import Memory, MemoryType, MemoryStore, SearchResult, EMBED_DIM
 
 
 @pytest.fixture
 def store(tmp_path):
-    return MemoryStore(base_dir=tmp_path)
+    s = MemoryStore(base_dir=tmp_path)
+    s._embed = lambda text: np.random.default_rng(hash(text) % 2**32).random(EMBED_DIM).astype(np.float32).tobytes()
+    return s
 
 
 class TestCRUD:

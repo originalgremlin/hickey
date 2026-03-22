@@ -96,14 +96,9 @@ class MemoryStore:
         self._db.execute("""
             CREATE TABLE IF NOT EXISTS watermarks (
                 transcript_path TEXT PRIMARY KEY,
-                byte_offset     INTEGER NOT NULL DEFAULT 0,
-                project         TEXT NOT NULL DEFAULT ''
+                byte_offset     INTEGER NOT NULL DEFAULT 0
             )
         """)
-        try:
-            self._db.execute("ALTER TABLE watermarks ADD COLUMN project TEXT NOT NULL DEFAULT ''")
-        except Exception:
-            pass  # column already exists
         self._db.commit()
 
     def _embed(self, text: str) -> bytes:
@@ -266,25 +261,18 @@ class MemoryStore:
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:limit]
 
-    def get_watermark(self, transcript_path: str) -> T.Optional[int]:
-        """Get byte_offset for a transcript, or None if not registered."""
+    def get_watermark(self, transcript_path: str) -> int:
+        """Get byte_offset for a transcript, or 0 if not registered."""
         row = self._db.execute(
             "SELECT byte_offset FROM watermarks WHERE transcript_path = ?",
             (transcript_path,),
         ).fetchone()
-        return row[0] if row else None
+        return row[0] if row else 0
 
-    def set_watermark(self, transcript_path: str, byte_offset: int, project: str = "") -> None:
+    def set_watermark(self, transcript_path: str, byte_offset: int) -> None:
         """Upsert watermark for a transcript."""
         self._db.execute(
-            "INSERT OR REPLACE INTO watermarks (transcript_path, byte_offset, project) VALUES (?, ?, ?)",
-            (transcript_path, byte_offset, project),
+            "INSERT OR REPLACE INTO watermarks (transcript_path, byte_offset) VALUES (?, ?)",
+            (transcript_path, byte_offset),
         )
         self._db.commit()
-
-    def all_watermarks(self) -> list[tuple[str, int, str]]:
-        """Return all watermarks as (transcript_path, byte_offset, project) tuples."""
-        rows = self._db.execute(
-            "SELECT transcript_path, byte_offset, project FROM watermarks"
-        ).fetchall()
-        return [(r[0], r[1], r[2]) for r in rows]
