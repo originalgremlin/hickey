@@ -54,15 +54,11 @@ class SearchResult(T.NamedTuple):
 
 
 class MemoryStore:
-    def __init__(self, base_dir: T.Optional[Path] = None):
-        self.base_dir: Path = Path(base_dir) if base_dir else Path.home() / ".hickey"
-        self.db_path: Path = self.base_dir / "hickey.db"
-        self.base_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, base_dir: Path = Path.home() / ".hickey"):
+        base_dir.mkdir(parents=True, exist_ok=True)
+        self.base_dir = base_dir
+        self.db_path: Path = base_dir / "memory.db"
         self._init_db()
-
-    @cached_property
-    def embedder(self) -> TextEmbedding:
-        return TextEmbedding(EMBED_MODEL)
 
     def _init_db(self) -> None:
         self._db: sqlite3.Connection = sqlite3.connect(str(self.db_path), check_same_thread=False)
@@ -101,6 +97,10 @@ class MemoryStore:
             )
         """)
         self._db.commit()
+
+    @cached_property
+    def embedder(self) -> TextEmbedding:
+        return TextEmbedding(EMBED_MODEL)
 
     def _embed(self, text: str) -> bytes:
         return list(self.embedder.embed([text]))[0].tobytes()
