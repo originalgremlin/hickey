@@ -13,7 +13,7 @@
           },
           {
             "type": "command",
-            "command": "curl -s -X POST http://localhost:8420/hook -H 'Content-Type: application/json' -d \"$(cat)\"",
+            "command": "curl -s -X POST http://localhost:8420/hook -H 'Content-Type: application/json' -d @-",
             "timeout": 120000
           }
         ]
@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "curl -s -X POST http://localhost:8420/hook -H 'Content-Type: application/json' -d \"$(cat)\"",
+            "command": "curl -s -X POST http://localhost:8420/hook -H 'Content-Type: application/json' -d @-",
             "timeout": 120000
           }
         ]
@@ -37,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "curl -s -X POST http://localhost:8420/hook -H 'Content-Type: application/json' -d \"$(cat)\"",
+            "command": "curl -s -X POST http://localhost:8420/hook -H 'Content-Type: application/json' -d @-",
             "timeout": 120000
           }
         ]
