@@ -70,18 +70,12 @@ async def hook(request: Request) -> JSONResponse:
     """Claude Code hook. Digests transcripts on session boundaries."""
     body: bytes = await request.body()
     data: dict = json.loads(body)
-    # get transcript file
+    cwd: str = data.get("cwd", "")
+    project: str = os.path.basename(cwd) if cwd else "unknown"
     transcript_path: str = data.get("transcript_path", "")
     if not transcript_path:
         return JSONResponse({})
-    # register the project
-    cwd: str = data.get("cwd", "")
-    project: str = os.path.basename(cwd) if cwd else "unknown"
-    digest.register(transcript_path, project)
-    # summarize the transcript in background (avoid blocking the event loop)
     match data.get("hook_event_name", ""):
-        case "SessionStart":
-            threading.Thread(target=digest.digest_all, daemon=True).start()
         case "PreCompact" | "SessionEnd":
-            threading.Thread(target=digest.digest, args=(transcript_path,), daemon=True).start()
+            threading.Thread(target=digest.digest, args=(transcript_path, project), daemon=True).start()
     return JSONResponse({})

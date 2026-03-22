@@ -1,12 +1,10 @@
 import json
 import subprocess
-import threading
 from pathlib import Path
 from hickey import api
 
 
 MAX_TOOL_OUTPUT: int = 2000
-_lock: threading.Lock = threading.Lock()
 VALID_TYPES: set[str] = {"correction", "decision", "fact", "preference", "investigation"}
 
 SKIP_MARKERS: tuple[str, ...] = (
@@ -38,52 +36,23 @@ Return ONLY a JSON array:
 Or if nothing worth storing: []"""
 
 
-def register(transcript_path: str, project: str) -> None:
-    """Register a transcript for digesting. Idempotent."""
-    if api.store.get_watermark(transcript_path) is None:
-        api.store.set_watermark(transcript_path, 0, project)
-
-
-def digest(transcript_path: str) -> int:
-    """Digest new content from a specific transcript. Returns memories stored."""
-    with _lock:
-        wm: tuple[int, str] | None = api.store.get_watermark(transcript_path)
-        if not wm:
-            return 0
-        offset, project = wm
-        count, new_offset = _digest_one(transcript_path, project, offset)
-        api.store.set_watermark(transcript_path, new_offset, project)
-        return count
-
-
-def digest_all() -> int:
-    """Digest all registered transcripts. Returns total memories stored."""
-    with _lock:
-        total: int = 0
-        for path, offset, project in api.store.all_watermarks():
-            count, new_offset = _digest_one(path, project, offset)
-            api.store.set_watermark(path, new_offset, project)
-            total += count
-        return total
-
-
-def _digest_one(path: str, project: str, offset: int) -> tuple[int, int]:
-    """Read new content from one transcript and extract memories."""
-    p: Path = Path(path).expanduser()
+def digest(transcript_path: str, project: str) -> int:
+    """Digest new content from a transcript. Returns memories stored."""
+    offset: int = api.store.get_watermark(transcript_path) or 0
+    p: Path = Path(transcript_path).expanduser()
     if not p.exists():
-        return 0, offset
+        return 0
     with open(p, "r") as f:
         f.seek(offset)
         raw: str = f.read()
         new_offset: int = f.tell()
-    if not raw.strip():
-        return 0, new_offset
-    conversation: str = _parse_transcript(raw)
+    conversation: str = _parse_transcript(raw) if raw.strip() else ""
     if not conversation:
-        return 0, new_offset
+        api.store.set_watermark(transcript_path, new_offset)
+        return 0
     memories: list[dict] | None = _extract(conversation)
     if memories is None:
-        return 0, offset
+        return 0
     for mem in memories:
         api.save(
             content=mem["content"],
@@ -91,9 +60,10 @@ def _digest_one(path: str, project: str, offset: int) -> tuple[int, int]:
             project=project,
             confidence=mem.get("confidence", 0.8),
         )
+    api.store.set_watermark(transcript_path, new_offset)
     if memories:
         print(f"[digest] stored {len(memories)} memories for project={project}", flush=True)
-    return len(memories), new_offset
+    return len(memories)
 
 
 def _parse_transcript(raw: str) -> str:
