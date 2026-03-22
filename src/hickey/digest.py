@@ -13,6 +13,7 @@ SKIP_MARKERS: tuple[str, ...] = (
     "<command-name>",
     "<local-command-stdout>",
     "You are a memory extraction system",
+    "This session is being continued from a previous conversation",
 )
 
 PROMPT: str = """You are a memory extraction system. Given a conversation between a user and an AI coding assistant working on the project "{project}", extract memories worth preserving for future sessions.
