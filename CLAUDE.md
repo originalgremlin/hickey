@@ -16,20 +16,24 @@ uv pip install -e . pytest --python .venv/bin/python
 
 ## Architecture
 
-Five modules, same four verbs (save, delete, list, search):
+Four modules, same four verbs (save, delete, list, search):
 
-- **store.py** — `Memory`, `MemoryType`, `SearchResult`, `MemoryStore`. SQLite is the single source of truth. Four tables: `memories` (primary), `memories_fts` (FTS5), `memories_vec` (sqlite-vec), `watermarks` (digest progress). Hybrid search with RRF fusion, scored by type weight × confidence × freshness decay.
+- **store.py** — `Memory`, `MemoryType`, `SearchResult`, `MemoryStore`. SQLite is the single source of truth. Four tables: `memories` (primary), `memories_fts` (FTS5), `memories_vec` (sqlite-vec), `watermarks` (digest progress). DB at `~/.hickey/memory.db`. Hybrid search with RRF fusion, scored by type weight × confidence × freshness decay.
 - **api.py** — Four functions that bridge store to frontends. Handles string→MemoryType conversion. Shared by CLI and MCP.
-- **mcp.py** — FastMCP server on port 8420 (streamable-http). Four MCP tools + `/hook` HTTP endpoint for SessionStart, PreCompact, and SessionEnd hooks.
+- **mcp.py** — FastMCP server on port 8420 (streamable-http). Four MCP tools + `/hook` route for PreCompact and SessionEnd hooks.
 - **cli.py** — Click CLI. Admin: `start`, `stop`. Memory: `save`, `delete`, `list`, `search`.
-- **digest.py** — Reads Claude Code transcript JSONL, calls Haiku via `claude -p` to extract typed memories. Triggered by hooks on session boundaries. Tracks byte-offset watermarks per transcript to process incrementally. Chunks at 20K chars. All-or-nothing: if any chunk fails extraction, nothing is stored and the watermark stays put. A threading lock serializes all digest work since hooks fire from background threads.
+- **digest.py** — Reads Claude Code transcript JSONL, calls Sonnet via `claude -p --system-prompt` to extract typed memories. Triggered by hooks on PreCompact and SessionEnd. Tracks byte-offset watermarks per transcript to process incrementally. Project name injected into the extraction prompt for domain context.
+
+## Plugin
+
+`plugins/hickey/.claude-plugin/plugin.json` — hooks and MCP server config. All hooks use `type: "command"` with `curl -d @-` to forward stdin to the server. SessionStart only supports command hooks (not HTTP). The plugin is installed via the Claude Code marketplace.
 
 ## Design Constraints
 
 - 4 MCP tools — fewer tools = less model confusion
 - SQLite is the only storage — no files, no derived caches, no rebuild command
 - Corrections > decisions > facts in search ranking and decay rate
-- Digest uses Haiku to summarize — only stores what's worth remembering, not raw responses
+- Digest uses Sonnet — only stores what's worth remembering, not raw responses
 
 ## Code Style
 
