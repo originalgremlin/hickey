@@ -12,9 +12,9 @@
             "command": "hickey start 2>/dev/null || true"
           },
           {
-            "type": "http",
-            "url": "http://localhost:8420/hook",
-            "timeout": 120
+            "type": "command",
+            "command": "curl -s -X POST http://localhost:8420/hook -H 'Content-Type: application/json' -d \"$(cat)\"",
+            "timeout": 120000
           }
         ]
       }
@@ -24,9 +24,9 @@
         "matcher": "",
         "hooks": [
           {
-            "type": "http",
-            "url": "http://localhost:8420/hook",
-            "timeout": 120
+            "type": "command",
+            "command": "curl -s -X POST http://localhost:8420/hook -H 'Content-Type: application/json' -d \"$(cat)\"",
+            "timeout": 120000
           }
         ]
       }
@@ -36,9 +36,9 @@
         "matcher": "",
         "hooks": [
           {
-            "type": "http",
-            "url": "http://localhost:8420/hook",
-            "timeout": 120
+            "type": "command",
+            "command": "curl -s -X POST http://localhost:8420/hook -H 'Content-Type: application/json' -d \"$(cat)\"",
+            "timeout": 120000
           }
         ]
       }
