@@ -6,12 +6,15 @@ from hickey import api
 
 
 MAX_TOOL_OUTPUT: int = 2000
-MAX_CHUNK: int = 20_000
 _lock: threading.Lock = threading.Lock()
 VALID_TYPES: set[str] = {"correction", "decision", "fact", "preference", "investigation"}
 
+SKIP_MARKERS: tuple[str, ...] = (
+    "<system-reminder>", "<local-command-caveat>", "<command-name>", "<local-command-stdout>",
+    "You are a memory extraction system",
+)
 
-PROMPT: str = """You are a memory extraction system. Given a chunk of conversation between a user and an AI coding assistant, extract memories worth preserving for future sessions.
+PROMPT: str = """You are a memory extraction system. Given a conversation between a user and an AI coding assistant, extract memories worth preserving for future sessions.
 
 Memory types:
 - correction: A mistake was identified. "Don't do X, do Y instead."
@@ -65,9 +68,7 @@ def digest_all() -> int:
 
 
 def _digest_one(path: str, project: str, offset: int) -> tuple[int, int]:
-    """Read new content from one transcript and extract memories.
-    Chunks the conversation to avoid timeouts. All-or-nothing: if any chunk
-    fails extraction, no memories are stored and the watermark stays put."""
+    """Read new content from one transcript and extract memories."""
     p: Path = Path(path).expanduser()
     if not p.exists():
         return 0, offset
@@ -77,43 +78,26 @@ def _digest_one(path: str, project: str, offset: int) -> tuple[int, int]:
         new_offset: int = f.tell()
     if not raw.strip():
         return 0, new_offset
-    segments: list[str] = _parse_transcript(raw)
-    if not segments:
+    conversation: str = _parse_transcript(raw)
+    if not conversation:
         return 0, new_offset
-    # Extract from all chunks first, store only if all succeed
-    all_memories: list[dict] = []
-    chunk: list[str] = []
-    chunk_len: int = 0
-    for seg in segments:
-        if chunk and chunk_len + len(seg) > MAX_CHUNK:
-            memories: list[dict] | None = _extract("\n\n".join(chunk))
-            if memories is None:
-                return 0, offset
-            all_memories.extend(memories)
-            chunk = []
-            chunk_len = 0
-        chunk.append(seg)
-        chunk_len += len(seg)
-    if chunk:
-        memories = _extract("\n\n".join(chunk))
-        if memories is None:
-            return 0, offset
-        all_memories.extend(memories)
-    # All chunks succeeded — store everything
-    for mem in all_memories:
+    memories: list[dict] | None = _extract(conversation)
+    if memories is None:
+        return 0, offset
+    for mem in memories:
         api.save(
             content=mem["content"],
             type=mem.get("type", "fact"),
             project=project,
             confidence=mem.get("confidence", 0.8),
         )
-    if all_memories:
-        print(f"[digest] stored {len(all_memories)} memories for project={project}", flush=True)
-    return len(all_memories), new_offset
+    if memories:
+        print(f"[digest] stored {len(memories)} memories for project={project}", flush=True)
+    return len(memories), new_offset
 
 
-def _parse_transcript(raw: str) -> list[str]:
-    """Parse JSONL transcript into conversation segments (one per turn)."""
+def _parse_transcript(raw: str) -> str:
+    """Parse JSONL transcript into a single conversation string."""
     segments: list[str] = []
     for line in raw.strip().split("\n"):
         if not line.strip():
@@ -127,21 +111,19 @@ def _parse_transcript(raw: str) -> list[str]:
         t: str = entry.get("type", "")
         if t == "user":
             text: str = _parse_user(entry)
-            if text:
-                segments.append(f"user: {text}")
         elif t == "assistant":
             text = _parse_assistant(entry)
-            if text:
-                segments.append(f"assistant: {text}")
-    return segments
+        else:
+            continue
+        if text and not any(m in text for m in SKIP_MARKERS):
+            segments.append(f"{t}: {text}")
+    return "\n\n".join(segments)
 
 
 def _parse_user(entry: dict) -> str:
     """Extract text from a user transcript entry."""
     content = entry.get("message", {}).get("content", "")
     if isinstance(content, str):
-        if any(tag in content for tag in ("<system-reminder>", "<local-command-caveat>", "<command-name>", "<local-command-stdout>")):
-            return ""
         return content
     if isinstance(content, list):
         parts: list[str] = []
@@ -149,9 +131,7 @@ def _parse_user(entry: dict) -> str:
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "text":
-                text: str = block["text"]
-                if "<system-reminder>" not in text:
-                    parts.append(text)
+                parts.append(block["text"])
             elif block.get("type") == "tool_result":
                 result: str = str(block.get("content", ""))
                 if len(result) > MAX_TOOL_OUTPUT:
@@ -184,14 +164,13 @@ def _parse_assistant(entry: dict) -> str:
 def _extract(conversation: str) -> list[dict] | None:
     """Call claude CLI to extract memories from conversation.
     Returns list on success (possibly empty), None on failure."""
-    full_input: str = f"{PROMPT}\n\n---\n\n{conversation}"
     try:
         result: subprocess.CompletedProcess = subprocess.run(
-            ["claude", "-p", "--model", "haiku"],
-            input=full_input,
+            ["claude", "-p", "--model", "sonnet", "--system-prompt", PROMPT],
+            input=conversation,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=300,
         )
         text: str = result.stdout.strip()
         if result.returncode != 0 or not text:
@@ -201,13 +180,14 @@ def _extract(conversation: str) -> list[dict] | None:
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         print(f"[digest] claude call failed: {e}", flush=True)
         return None
-    # strip markdown code fences if present
-    if text.startswith("```"):
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
+    # find JSON array in the response
+    start: int = text.find("[")
+    end: int = text.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        print(f"[digest] no JSON array found: {text[:200]}", flush=True)
+        return None
     try:
-        memories = json.loads(text)
+        memories = json.loads(text[start:end + 1])
         if isinstance(memories, list):
             return [
                 m for m in memories
